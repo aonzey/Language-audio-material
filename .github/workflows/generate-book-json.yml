@@ -6,7 +6,7 @@ name: Auto Generate book.json
 on:
   push:
     paths:
-      - '**/book.json'
+      - '**/book'
   workflow_dispatch:
 
 # 允许 Actions 写回仓库（提交生成后的 book.json）
