@@ -1,7 +1,7 @@
 name: Auto Generate book.json
 
 # 触发条件：
-# 1. push 时新增了任意目录下的 book.json（如 touch 出的空白文件）
+# 1. push 时新增或修改了任意目录下的 book.json（空白内容会触发生成）
 # 2. 也可在 Actions 页面手动触发（workflow_dispatch）：扫描仓库中所有空白 book.json 并生成
 on:
   push:
@@ -20,18 +20,24 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # 需要拿到上一个提交，用于判断新增文件
+          # 需要拿到上一个提交，用于判断新增/修改文件
           fetch-depth: 2
 
       - name: Find blank book.json to generate
         id: find
         run: |
+          # 防循环：github-actions[bot] 的提交不再处理
+          if [ "$(git log -1 --format='%an' 2>/dev/null)" = "github-actions[bot]" ]; then
+            echo "Skip: commit from github-actions[bot]"
+            echo "FILES=" >> "$GITHUB_ENV"
+            exit 0
+          fi
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
             # 手动触发：扫描仓库中所有空白 book.json
             FILES=$(find . -name book.json -empty -not -path './.git/*' | sed 's|^\./||' || true)
           elif git rev-parse HEAD^ >/dev/null 2>&1; then
-            # push 触发：只取本次提交中"新增"的 book.json（修改的不处理，避免循环）
-            FILES=$(git diff --name-only --diff-filter=A -z HEAD^ HEAD | tr '\0' '\n' | grep 'book\.json$' | grep -v '^$' || true)
+            # push 触发：取本次提交中"新增或修改"的 book.json（空白内容才会真正生成）
+            FILES=$(git diff --name-only --diff-filter=AM -z HEAD^ HEAD | tr '\0' '\n' | grep 'book\.json$' | grep -v '^$' || true)
           else
             # 首次提交（没有上一个提交）
             FILES=$(git show --name-only --diff-filter=A --format= HEAD | grep 'book\.json$' | grep -v '^$' || true)
@@ -103,15 +109,19 @@ jobs:
               targets = [line.strip() for line in sys.stdin if line.strip()]
               for path in targets:
                   if not os.path.exists(path):
+                      print(f"SKIP (not exists): {path}")
                       continue
-                  # 只处理空白 book.json，避免覆盖用户手写内容
-                  if os.path.getsize(path) != 0:
-                      print(f"SKIP (not blank): {path}")
+                  with open(path, "r", encoding="utf-8", errors="ignore") as f:
+                      content = f.read()
+                  if content.strip():
+                      print(f"SKIP (not blank, {len(content)} chars): {path}")
                       continue
                   folder = os.path.dirname(os.path.abspath(path))
+                  files = collect_unit_files(folder)
+                  print(f"Scan {folder}: {len(files)} audio/lyric file(s)")
                   book = generate_book(folder)
                   if book is None:
-                      print(f"SKIP (no audio/lyric files): {path}")
+                      print(f"SKIP (no audio/lyric files in directory): {path}")
                       continue
                   with open(path, "w", encoding="utf-8") as f:
                       json.dump(book, f, ensure_ascii=False, indent=2)
