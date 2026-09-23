@@ -1,0 +1,131 @@
+name: Auto Generate book.json
+
+# 触发条件：
+# 1. push 时新增了任意目录下的 book.json（如 touch 出的空白文件）
+# 2. 也可在 Actions 页面手动触发（workflow_dispatch）：扫描仓库中所有空白 book.json 并生成
+on:
+  push:
+    paths:
+      - '**/book.json'
+  workflow_dispatch:
+
+# 允许 Actions 写回仓库（提交生成后的 book.json）
+permissions:
+  contents: write
+
+jobs:
+  generate:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          # 需要拿到上一个提交，用于判断新增文件
+          fetch-depth: 2
+
+      - name: Find blank book.json to generate
+        id: find
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            # 手动触发：扫描仓库中所有空白 book.json
+            FILES=$(find . -name book.json -empty -not -path './.git/*' | sed 's|^\./||' || true)
+          elif git rev-parse HEAD^ >/dev/null 2>&1; then
+            # push 触发：只取本次提交中"新增"的 book.json（修改的不处理，避免循环）
+            FILES=$(git diff --name-only --diff-filter=A -z HEAD^ HEAD | tr '\0' '\n' | grep 'book\.json$' | grep -v '^$' || true)
+          else
+            # 首次提交（没有上一个提交）
+            FILES=$(git show --name-only --diff-filter=A --format= HEAD | grep 'book\.json$' | grep -v '^$' || true)
+          fi
+          echo "FILES<<EOF" >> "$GITHUB_ENV"
+          echo "$FILES" >> "$GITHUB_ENV"
+          echo "EOF" >> "$GITHUB_ENV"
+          echo "Target files:"
+          echo "$FILES"
+
+      - name: Generate book.json content
+        if: env.FILES != ''
+        run: |
+          cat > /tmp/generate_book.py << 'PYEOF'
+          # -*- coding: utf-8 -*-
+          import json
+          import os
+          import re
+          import sys
+
+          # 支持的音频扩展名（按优先级排序）
+          AUDIO_EXTS = {".mp3", ".m4a", ".wav", ".flac", ".ogg", ".aac", ".wma", ".opus", ".ape", ".aiff", ".aif"}
+          # 支持的歌词扩展名
+          LRC_EXTS = {".lrc"}
+
+          def collect_unit_files(folder):
+              """扫描目录下的音频/歌词文件，按基名去重（音频优先）。"""
+              files = {}
+              for entry in os.listdir(folder):
+                  full = os.path.join(folder, entry)
+                  if not os.path.isfile(full):
+                      continue
+                  base, ext = os.path.splitext(entry)
+                  ext = ext.lower()
+                  if ext in AUDIO_EXTS or ext in LRC_EXTS:
+                      if base not in files or ext in AUDIO_EXTS:
+                          files[base] = full
+              return files
+
+          def parse_unit(base_name):
+              """从基名解析排序键与 title。示例: '001&002－Excuse Me' -> (1, 'Excuse Me')"""
+              sort_key = float("inf")
+              m = re.match(r"^\d+", base_name)
+              if m:
+                  sort_key = int(m.group(0))
+              title = base_name
+              # 分隔符：全角破折号 \uff0d 优先，其次半角 -
+              for s in ("\uff0d", "-"):
+                  if s in base_name:
+                      title = base_name.split(s, 1)[1].strip()
+                      break
+              # 去掉结尾句点与空白（如 "Sorry, Sir." -> "Sorry, Sir"）
+              title = re.sub(r"[.\s]+$", "", title)
+              return sort_key, title
+
+          def generate_book(folder):
+              name = os.path.basename(os.path.normpath(folder))
+              files = collect_unit_files(folder)
+              if not files:
+                  return None
+              units = []
+              for base in sorted(files, key=lambda b: parse_unit(b)[0]):
+                  _, title = parse_unit(base)
+                  units.append({"title": title, "filename": base})
+              return {"name": name, "level": "Unknow", "units": units}
+
+          def main():
+              # 从 stdin 读取目标文件列表（相对仓库根目录，逐行一个路径）
+              targets = [line.strip() for line in sys.stdin if line.strip()]
+              for path in targets:
+                  if not os.path.exists(path):
+                      continue
+                  # 只处理空白 book.json，避免覆盖用户手写内容
+                  if os.path.getsize(path) != 0:
+                      print(f"SKIP (not blank): {path}")
+                      continue
+                  folder = os.path.dirname(os.path.abspath(path))
+                  book = generate_book(folder)
+                  if book is None:
+                      print(f"SKIP (no audio/lyric files): {path}")
+                      continue
+                  with open(path, "w", encoding="utf-8") as f:
+                      json.dump(book, f, ensure_ascii=False, indent=2)
+                  print(f"GENERATED: {path} ({len(book['units'])} units)")
+
+          main()
+          PYEOF
+          echo "$FILES" | python3 /tmp/generate_book.py
+
+      - name: Commit and push
+        if: env.FILES != ''
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add -A
+          git diff --cached --quiet || git commit -m "chore: auto generate book.json content"
+          git push
