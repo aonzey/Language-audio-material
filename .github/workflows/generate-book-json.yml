@@ -1,12 +1,13 @@
 name: Auto Generate book.json
 
 # 触发条件：
-# 1. push 时新增或修改了任意目录下的 book.json（空白内容会触发生成）
-# 2. 也可在 Actions 页面手动触发（workflow_dispatch）：扫描仓库中所有空白 book.json 并生成
+# 1. push 时新增/修改了任意目录下的 generatejson 标记文件（无扩展名），
+#    自动扫描该目录的音频/歌词文件，生成 book.json 写入同一目录
+# 2. 也可在 Actions 页面手动触发（workflow_dispatch）：为仓库中所有含 generatejson 的目录生成
 on:
   push:
     paths:
-      - '**/book'
+      - '**/generatejson'
   workflow_dispatch:
 
 # 允许 Actions 写回仓库（提交生成后的 book.json）
@@ -20,35 +21,29 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
         with:
-          # 需要拿到上一个提交，用于判断新增/修改文件
+          # 需要拿到上一个提交，用于定位本次变更的 generatejson
           fetch-depth: 2
 
-      - name: Find blank book.json to generate
+      - name: Find generatejson marker files
         id: find
         run: |
-          # 防循环：github-actions[bot] 的提交不再处理
-          if [ "$(git log -1 --format='%an' 2>/dev/null)" = "github-actions[bot]" ]; then
-            echo "Skip: commit from github-actions[bot]"
-            echo "FILES=" >> "$GITHUB_ENV"
-            exit 0
-          fi
           if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
-            # 手动触发：扫描仓库中所有空白 book.json
-            FILES=$(find . -name book.json -empty -not -path './.git/*' | sed 's|^\./||' || true)
+            # 手动触发：找出仓库中所有 generatejson 标记文件
+            FILES=$(find . -name generatejson -not -path './.git/*' | sed 's|^\./||' || true)
           elif git rev-parse HEAD^ >/dev/null 2>&1; then
-            # push 触发：取本次提交中"新增或修改"的 book.json（空白内容才会真正生成）
-            FILES=$(git diff --name-only --diff-filter=AM -z HEAD^ HEAD | tr '\0' '\n' | grep 'book\.json$' | grep -v '^$' || true)
+            # push 触发：取本次提交中新增/修改的 generatejson 文件
+            FILES=$(git diff --name-only --diff-filter=AM -z HEAD^ HEAD | tr '\0' '\n' | grep -E '(^|/)generatejson$' | grep -v '^$' || true)
           else
             # 首次提交（没有上一个提交）
-            FILES=$(git show --name-only --diff-filter=A --format= HEAD | grep 'book\.json$' | grep -v '^$' || true)
+            FILES=$(git show --name-only --diff-filter=A --format= HEAD | grep -E '(^|/)generatejson$' | grep -v '^$' || true)
           fi
           echo "FILES<<EOF" >> "$GITHUB_ENV"
           echo "$FILES" >> "$GITHUB_ENV"
           echo "EOF" >> "$GITHUB_ENV"
-          echo "Target files:"
+          echo "Marker files:"
           echo "$FILES"
 
-      - name: Generate book.json content
+      - name: Generate book.json for each marker directory
         if: env.FILES != ''
         run: |
           cat > /tmp/generate_book.py << 'PYEOF'
@@ -78,7 +73,7 @@ jobs:
               return files
 
           def parse_unit(base_name):
-              """从基名解析排序键与 title。示例: '001&002－Excuse Me' -> (1, 'Excuse Me')"""
+              """从基名解析排序键与 title。示例: '001&002\u2010Excuse Me' -> (1, 'Excuse Me')"""
               sort_key = float("inf")
               m = re.match(r"^\d+", base_name)
               if m:
@@ -105,16 +100,11 @@ jobs:
               return {"name": name, "level": "Unknow", "units": units}
 
           def main():
-              # 从 stdin 读取目标文件列表（相对仓库根目录，逐行一个路径）
+              # 从 stdin 读取 generatejson 标记文件列表（相对仓库根目录，逐行一个路径）
               targets = [line.strip() for line in sys.stdin if line.strip()]
               for path in targets:
                   if not os.path.exists(path):
                       print(f"SKIP (not exists): {path}")
-                      continue
-                  with open(path, "r", encoding="utf-8", errors="ignore") as f:
-                      content = f.read()
-                  if content.strip():
-                      print(f"SKIP (not blank, {len(content)} chars): {path}")
                       continue
                   folder = os.path.dirname(os.path.abspath(path))
                   files = collect_unit_files(folder)
@@ -123,9 +113,10 @@ jobs:
                   if book is None:
                       print(f"SKIP (no audio/lyric files in directory): {path}")
                       continue
-                  with open(path, "w", encoding="utf-8") as f:
+                  out_path = os.path.join(folder, "book.json")
+                  with open(out_path, "w", encoding="utf-8") as f:
                       json.dump(book, f, ensure_ascii=False, indent=2)
-                  print(f"GENERATED: {path} ({len(book['units'])} units)")
+                  print(f"GENERATED: {out_path} ({len(book['units'])} units)")
 
           main()
           PYEOF
