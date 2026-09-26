@@ -7,7 +7,11 @@ on:
     branches: [main]
     paths-ignore:
       - '**/generatejson'      # 你的固定临时文件名
-      - 'scratch/**'         # 顺手把临时目录也排掉
+
+  # 新增：生成数据的 workflow 跑完就部署
+  workflow_run:
+    workflows: ["Auto Generate book.json"]
+    types: [completed]
 
   # Allows you to run this workflow manually from the Actions tab
   workflow_dispatch:
@@ -27,6 +31,9 @@ concurrency:
 jobs:
   # Build job
   build:
+    if: >-
+      github.event_name != 'workflow_run' ||
+      github.event.workflow_run.conclusion == 'success'
     runs-on: ubuntu-latest
     steps:
       - name: Checkout
