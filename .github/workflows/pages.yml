@@ -38,15 +38,20 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+        
       - name: Setup Pages
         uses: actions/configure-pages@v5
-      - name: Build with Jekyll
-        uses: actions/jekyll-build-pages@v1
-        with:
-          source: ./
-          destination: ./_site
+
+      # 只用来确认体积，稳定后可以删掉这两行
+      - name: Report publish size
+        run: |
+          du -sh .
+          find . -type f ! -path './.git/*' | wc -l
+
       - name: Upload artifact
         uses: actions/upload-pages-artifact@v3
+        with:
+          path: ./          # ← 关键：原来是默认的 _site/，现在直接发仓库根目录
 
   # Deployment job
   deploy:
